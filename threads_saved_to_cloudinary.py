@@ -108,6 +108,39 @@ def safe_get_text(elem):
 # NEW: More robust text extraction
 from selenium.webdriver.support.ui import WebDriverWait as _WebDriverWait
 
+# Heuristic caption picker from block text
+_UI_NOISE_WORDS = {
+    "like", "reply", "repost", "share", "follow", "translate", "more", "see more",
+    "followers", "following", "posts", "views", "comments"
+}
+
+def _pick_caption_from_text_block(text_block):
+    try:
+        lines = [" ".join(line.split()) for line in text_block.splitlines()]
+        candidates = []
+        for line in lines:
+            if not line:
+                continue
+            low = line.lower()
+            if any(w in low for w in _UI_NOISE_WORDS):
+                if len(low) <= 14:
+                    continue
+            if low.endswith("h") or low.endswith("m") or low.endswith("d"):
+                if len(low) <= 3 and low[:-1].isdigit():
+                    continue
+            if low.isdigit():
+                continue
+            if len(line) < 2:
+                continue
+            candidates.append(line)
+        if candidates:
+            candidates.sort(key=lambda s: len(s), reverse=True)
+            return candidates[0]
+        return ""
+    except Exception:
+        return ""
+
+
 def extract_text_from_element(driver, elem, timeout=2):
     try:
         # Ensure element is in viewport for virtualized UIs
@@ -132,9 +165,13 @@ def extract_text_from_element(driver, elem, timeout=2):
             pass
 
         # 2) Prefer the browser-computed innerText which respects visibility and CSS
+        inner_text = None
         try:
             inner_text = driver.execute_script("return arguments[0].innerText;", elem)
             if inner_text and inner_text.strip():
+                picked = _pick_caption_from_text_block(inner_text)
+                if picked:
+                    return picked
                 return " ".join(inner_text.split())
         except Exception:
             pass
@@ -167,7 +204,11 @@ def extract_text_from_element(driver, elem, timeout=2):
                             continue
                         texts.append(ss)
                     if texts:
-                        return " ".join(texts)
+                        joined = "\n".join(texts)
+                        picked = _pick_caption_from_text_block(joined)
+                        if picked:
+                            return picked
+                        return " ".join(joined.split())
                 except Exception:
                     continue
         except Exception:
@@ -177,7 +218,12 @@ def extract_text_from_element(driver, elem, timeout=2):
         try:
             text_nodes = elem.find_elements(By.XPATH, ".//span|.//p|.//div")
             combined = " ".join([safe_get_text(x) for x in text_nodes if safe_get_text(x)])
-            return combined.strip()
+            combined = combined.strip()
+            if combined:
+                picked = _pick_caption_from_text_block(combined)
+                if picked:
+                    return picked
+            return combined
         except Exception:
             return ""
     except Exception:

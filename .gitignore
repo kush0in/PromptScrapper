@@ -1,0 +1,15 @@
+# Generated media
+pictures/
+
+# Generated data files
+*.csv
+*.xlsx
+
+# Saved Threads demo files
+Saved • Threads.html
+Saved */
+Saved*/
+
+# OS files
+.DS_Store
+Thumbs.db

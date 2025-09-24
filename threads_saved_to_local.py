@@ -27,14 +27,64 @@ import shutil as _shutil
 
 
 # -------------------------
+# Timezone helpers
+# -------------------------
+from datetime import timezone as _timezone, timedelta as _timedelta
+IST_TZ = _timezone(_timedelta(hours=5, minutes=30), name="IST")
+
+def now_ist_iso():
+    try:
+        return datetime.now(IST_TZ).isoformat()
+    except Exception:
+        # Fallback to naive +05:30 if timezone not supported
+        ist = datetime.utcnow() + _timedelta(hours=5, minutes=30)
+        return ist.isoformat()
+
+# Heuristic caption picker from block text
+_UI_NOISE_WORDS = {
+    "like", "reply", "repost", "share", "follow", "translate", "more", "see more",
+    "followers", "following", "posts", "views", "comments"
+}
+
+def _pick_caption_from_text_block(text_block):
+    try:
+        lines = [" ".join(line.split()) for line in text_block.splitlines()]
+        candidates = []
+        for line in lines:
+            if not line:
+                continue
+            low = line.lower()
+            if any(w in low for w in _UI_NOISE_WORDS):
+                # skip pure UI lines
+                if len(low) <= 14:
+                    continue
+            if low.endswith("h") or low.endswith("m") or low.endswith("d"):
+                # likely a "16h" time label
+                if len(low) <= 3 and low[:-1].isdigit():
+                    continue
+            if low.isdigit():
+                continue
+            if len(line) < 2:
+                continue
+            candidates.append(line)
+        # Prefer the longest candidate as caption
+        if candidates:
+            candidates.sort(key=lambda s: len(s), reverse=True)
+            return candidates[0]
+        return ""
+    except Exception:
+        return ""
+
+
+# -------------------------
 # CONFIG - edit these
 # -------------------------
 SAVED_PAGE_URL = os.getenv("THREADS_SAVED_URL", "https://www.threads.com/saved")
 
-# Save images to the PARENT folder of this project, inside 'threads_saved_images'
+# Save images inside this project, in 'pictures'
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.abspath(os.path.join(PROJECT_DIR, os.pardir))
-IMAGES_DIR = os.path.join(PARENT_DIR, "threads_saved_images")
+IMAGES_DIR = os.path.join(PROJECT_DIR, "pictures")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # Selenium profile reuse
@@ -271,9 +321,14 @@ def extract_text_from_element(driver, elem, timeout=2):
             pass
 
         # 2) Prefer the browser-computed innerText which respects visibility and CSS
+        inner_text = None
         try:
             inner_text = driver.execute_script("return arguments[0].innerText;", elem)
             if inner_text and inner_text.strip():
+                # Try to extract likely caption from block text
+                picked = _pick_caption_from_text_block(inner_text)
+                if picked:
+                    return picked
                 return " ".join(inner_text.split())
         except Exception:
             pass
@@ -291,7 +346,6 @@ def extract_text_from_element(driver, elem, timeout=2):
                     container = tbtn
                     for _ in range(3):
                         container = container.find_element(By.XPATH, "..")
-                    # Within this container, look for the first span/p/div with non-trivial text
                     candidates = container.find_elements(By.XPATH, ".//span|.//p|.//div")
                     texts = []
                     for c in candidates:
@@ -299,7 +353,6 @@ def extract_text_from_element(driver, elem, timeout=2):
                         if not s:
                             continue
                         ss = s.strip()
-                        # ignore UI labels and counters
                         if len(ss) < 2:
                             continue
                         if ss.lower() in ("translate", "more", "see more"):
@@ -308,7 +361,12 @@ def extract_text_from_element(driver, elem, timeout=2):
                             continue
                         texts.append(ss)
                     if texts:
-                        return " ".join(texts)
+                        # Use heuristic on joined text
+                        joined = "\n".join(texts)
+                        picked = _pick_caption_from_text_block(joined)
+                        if picked:
+                            return picked
+                        return " ".join(joined.split())
                 except Exception:
                     continue
         except Exception:
@@ -318,7 +376,12 @@ def extract_text_from_element(driver, elem, timeout=2):
         try:
             text_nodes = elem.find_elements(By.XPATH, ".//span|.//p|.//div")
             combined = " ".join([safe_get_text(x) for x in text_nodes if safe_get_text(x)])
-            return combined.strip()
+            combined = combined.strip()
+            if combined:
+                picked = _pick_caption_from_text_block(combined)
+                if picked:
+                    return picked
+            return combined
         except Exception:
             return ""
     except Exception:
@@ -665,7 +728,7 @@ def run(saved_page_url=SAVED_PAGE_URL, max_posts=None, headless=False):
                     "text": text,
                     "image_paths": saved_paths,
                     "num_images": len(saved_paths),
-                    "scraped_at": datetime.utcnow().isoformat()
+                    "scraped_at": now_ist_iso()
                 })
 
                 time.sleep(0.3)
@@ -686,9 +749,30 @@ def run(saved_page_url=SAVED_PAGE_URL, max_posts=None, headless=False):
 
         df = pd.DataFrame(rows)
         csv_out = OUTPUT_XLSX.replace(".xlsx", ".csv")
-        df.to_csv(csv_out, index=False, encoding="utf-8-sig")
-        df.to_excel(OUTPUT_XLSX, index=False)
-        print(f"Saved {len(df)} rows to {csv_out} and {OUTPUT_XLSX}")
+
+        # Merge with existing data if present (append behavior with de-dup)
+        combined_df = df
+        try:
+            if os.path.isfile(csv_out):
+                prev_csv = pd.read_csv(csv_out)
+                combined_df = pd.concat([prev_csv, df], ignore_index=True)
+            elif os.path.isfile(OUTPUT_XLSX):
+                prev_xlsx = pd.read_excel(OUTPUT_XLSX)
+                combined_df = pd.concat([prev_xlsx, df], ignore_index=True)
+        except Exception as _e:
+            # If reading previous fails, fall back to current df only
+            combined_df = df
+
+        # De-duplicate on key columns (source_url + text + image_paths)
+        try:
+            combined_df = combined_df.drop_duplicates(subset=["source_url", "text", "image_paths"], keep="last")
+        except Exception:
+            combined_df = combined_df.drop_duplicates(keep="last")
+
+        # Write combined output
+        combined_df.to_csv(csv_out, index=False, encoding="utf-8-sig")
+        combined_df.to_excel(OUTPUT_XLSX, index=False)
+        print(f"Saved {len(combined_df)} total rows to {csv_out} and {OUTPUT_XLSX}")
 
         print(f"Images saved to: {IMAGES_DIR}")
 
