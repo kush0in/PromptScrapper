@@ -121,7 +121,7 @@ OUTPUT_XLSX = os.getenv("OUTPUT_XLSX_LOCAL", "saved_posts_local.xlsx")
 
 # Credentials (fixed defaults; can be overridden by env vars)
 THREADS_ID = os.getenv("THREADS_ID", "Killian_kuffen").strip()
-THREADS_PASSWORD = os.getenv("THREADS_PASSWORD", "@Nujagrawa14").strip()
+THREADS_PASSWORD = os.getenv("THREADS_PASSWORD", "Password").strip()
 
 
 # -------------------------
